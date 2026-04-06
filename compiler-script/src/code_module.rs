@@ -243,13 +243,30 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
+    // fn_def: function with an explicit return type (passes CodeType directly, no Option wrapping)
     m.function(
         "fn_def",
-        |name: String, params: Vec<Param>, return_type: Option<CodeType>, body: Vec<Stmt>| Item {
+        |name: String, params: Vec<Param>, return_type: CodeType, body: Vec<Stmt>| Item {
             kind: ItemKind::Fn {
                 name,
                 params,
-                return_type,
+                return_type: Some(return_type),
+                body,
+                is_async: false,
+                is_pub: false,
+            },
+        },
+    )
+    .build()?;
+
+    // fn_def_void: function that returns nothing / unit
+    m.function(
+        "fn_def_void",
+        |name: String, params: Vec<Param>, body: Vec<Stmt>| Item {
+            kind: ItemKind::Fn {
+                name,
+                params,
+                return_type: None,
                 body,
                 is_async: false,
                 is_pub: false,
