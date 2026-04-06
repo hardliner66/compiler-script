@@ -164,6 +164,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rune",
+ "serde",
  "serde_json",
 ]
 

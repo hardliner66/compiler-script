@@ -15,6 +15,9 @@ use rune::Source;
 use rune::compile;
 use rune::macros::{MacroContext, TokenStream, quote};
 
+mod code_module;
+mod types;
+
 #[rune::macro_]
 fn span(cx: &mut MacroContext<'_, '_, '_>, _stream: &TokenStream) -> compile::Result<TokenStream> {
     let span = cx.macro_span();
@@ -39,6 +42,7 @@ fn generate(
     let mut sources = Sources::new();
     let source = Source::from_path(script)?;
     context.install(module()?)?;
+    context.install(code_module::module()?)?;
     sources.insert(source)?;
     let mut diagnostics = Diagnostics::new();
 
