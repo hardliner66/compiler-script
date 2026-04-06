@@ -1,5 +1,5 @@
 use std::{
-    io::Read,
+    io::{IsTerminal, Read},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -46,8 +46,19 @@ fn parse(
     let input_text: String = match input {
         Some(path) => std::fs::read_to_string(path)?,
         None => {
+            let stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                anyhow::bail!(
+                    "no input provided\n\
+                     \n\
+                     Pass a file with --input <file>, or pipe text to stdin:\n\
+                     \n\
+                     \techo '1 + 2 * 3' | cargo run --bin parser-script -- --pretty examples/arithmetic.rn\n\
+                     \tcargo run --bin parser-script -- --pretty --input expr.txt examples/arithmetic.rn"
+                );
+            }
             let mut buf = String::new();
-            std::io::stdin().read_to_string(&mut buf)?;
+            stdin.lock().read_to_string(&mut buf)?;
             buf
         }
     };
