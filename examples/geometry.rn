@@ -1,6 +1,5 @@
 // geometry.rn — example compiler-script
 //
-// This script is "always in macro mode": every line builds up code as data.
 // Run it with:
 //   cargo run --bin compiler-script -- --pretty examples/geometry.rn
 //
