@@ -1,0 +1,158 @@
+// arithmetic.rn — parses arithmetic expressions into a generic AST.
+//
+// Grammar:
+//   expr           = additive
+//   additive       = multiplicative (( '+' | '-' ) multiplicative)*
+//   multiplicative = unary (( '*' | '/' | '%' ) unary)*
+//   unary          = ( '-' | '+' ) unary | primary
+//   primary        = NUMBER | IDENT | '(' expr ')'
+//
+// Operator precedence is encoded in the grammar itself: additive binds
+// least tightly, then multiplicative, then unary, then primary.
+//
+// Usage:
+//   echo "2 + 3 * (4 - 1)" | cargo run --bin parser-script -- --pretty examples/arithmetic.rn
+//   cargo run --bin parser-script -- --pretty --input expr.txt examples/arithmetic.rn
+//
+// Example: "1 + 2 * 3" produces
+//   {
+//     "kind": "add",
+//     "children": [
+//       { "kind": "number", "value": "1", "span": { ... } },
+//       { "kind": "mul",
+//         "children": [
+//           { "kind": "number", "value": "2", "span": { ... } },
+//           { "kind": "number", "value": "3", "span": { ... } }
+//         ]
+//       }
+//     ]
+//   }
+
+pub fn main(input) {
+    let s = ast::scanner(input);
+    let node = parse_expr(s);
+
+    // If there is trailing non-whitespace after a valid expression, wrap the
+    // result in a "partial" node and attach the leftover text as an attribute
+    // so that the caller knows the input was not fully consumed.
+    s.skip_whitespace();
+    if !s.is_done() {
+        let leftover = s.remaining();
+        ast::node("partial", [node]).with_attr("leftover", leftover)
+    } else {
+        node
+    }
+}
+
+// ── Grammar rules (recursive descent) ────────────────────────────────────────
+
+fn parse_expr(s) {
+    s.skip_whitespace();
+    parse_additive(s)
+}
+
+// additive = multiplicative (( '+' | '-' ) multiplicative)*
+fn parse_additive(s) {
+    let lhs = parse_multiplicative(s);
+
+    loop {
+        s.skip_whitespace();
+        if s.consume_str("+") {
+            s.skip_whitespace();
+            let rhs = parse_multiplicative(s);
+            lhs = ast::node("add", [lhs, rhs]);
+        } else if s.consume_str("-") {
+            s.skip_whitespace();
+            let rhs = parse_multiplicative(s);
+            lhs = ast::node("sub", [lhs, rhs]);
+        } else {
+            break;
+        }
+    }
+
+    lhs
+}
+
+// multiplicative = unary (( '*' | '/' | '%' ) unary)*
+fn parse_multiplicative(s) {
+    let lhs = parse_unary(s);
+
+    loop {
+        s.skip_whitespace();
+        if s.consume_str("*") {
+            s.skip_whitespace();
+            let rhs = parse_unary(s);
+            lhs = ast::node("mul", [lhs, rhs]);
+        } else if s.consume_str("/") {
+            s.skip_whitespace();
+            let rhs = parse_unary(s);
+            lhs = ast::node("div", [lhs, rhs]);
+        } else if s.consume_str("%") {
+            s.skip_whitespace();
+            let rhs = parse_unary(s);
+            lhs = ast::node("rem", [lhs, rhs]);
+        } else {
+            break;
+        }
+    }
+
+    lhs
+}
+
+// unary = ( '-' | '+' ) unary | primary
+//
+// Unary minus negates; unary plus is a no-op included for completeness.
+// Both are right-associative (handled naturally by recursion).
+fn parse_unary(s) {
+    s.skip_whitespace();
+    if s.consume_str("-") {
+        s.skip_whitespace();
+        let operand = parse_unary(s);
+        ast::node("neg", [operand])
+    } else if s.consume_str("+") {
+        s.skip_whitespace();
+        parse_unary(s)
+    } else {
+        parse_primary(s)
+    }
+}
+
+// primary = NUMBER | IDENT | '(' expr ')'
+//
+// Captures a source span for leaf nodes so that downstream passes can
+// report errors with accurate line/column information.
+fn parse_primary(s) {
+    s.skip_whitespace();
+
+    if s.consume_str("(") {
+        // Grouped sub-expression — recurse and require a closing ')'.
+        let inner = parse_expr(s);
+        s.skip_whitespace();
+        s.expect_str(")")?;
+        ast::node("group", [inner])
+
+    } else if s.is_digit() {
+        // Numeric literal (integer or decimal float).
+        let start      = s.pos();
+        let start_line = s.line_num();
+        let start_col  = s.col_num();
+        let value      = s.read_number();
+        let span       = s.span_from(start, start_line, start_col);
+        ast::leaf("number", value).with_span(span)
+
+    } else if s.is_alpha() {
+        // Identifier — could be a variable name or a named constant.
+        let start      = s.pos();
+        let start_line = s.line_num();
+        let start_col  = s.col_num();
+        let name       = s.read_ident();
+        let span       = s.span_from(start, start_line, start_col);
+        ast::leaf("ident", name).with_span(span)
+
+    } else {
+        // Nothing we recognise — emit an error leaf and let the caller
+        // decide how to handle it (stop parsing, skip the character, etc.).
+        let got = s.peek_str(8);
+        ast::leaf("error", `unexpected input: ${got}`)
+    }
+}
