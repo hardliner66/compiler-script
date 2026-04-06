@@ -1,7 +1,10 @@
 use std::{
+    io::{IsTerminal, Read},
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use serde_json::Value as JsonValue;
 
 pub use rune;
 
@@ -16,6 +19,10 @@ use rune::Source;
 use rune::compile;
 use rune::macros::{MacroContext, TokenStream, quote};
 
+use crate::ast_types::{AstNode, Attr, Span};
+
+mod ast_module;
+mod ast_types;
 mod code_module;
 mod types;
 
@@ -27,16 +34,49 @@ fn span(cx: &mut MacroContext<'_, '_, '_>, _stream: &TokenStream) -> compile::Re
 }
 
 pub fn module() -> Result<Module, ContextError> {
-    let mut m = Module::with_item(["rugen"])?;
+    let mut m = Module::with_item(["common"])?;
 
     m.macro_meta(span)?;
 
     Ok(m)
 }
 
+/// Recursively convert a `serde_json::Value` into a `rune::runtime::Value` so
+/// that Rune scripts can walk the JSON tree with `node["key"]` / `node.get(…)`.
+fn json_to_rune(val: JsonValue) -> anyhow::Result<Value> {
+    Ok(match val {
+        JsonValue::Null => rune::to_value(())?,
+        JsonValue::Bool(b) => rune::to_value(b)?,
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                rune::to_value(i)?
+            } else {
+                rune::to_value(n.as_f64().unwrap_or(0.0))?
+            }
+        }
+        JsonValue::String(s) => rune::to_value(s)?,
+        JsonValue::Array(arr) => {
+            let mut vec = rune::runtime::Vec::new();
+            for item in arr {
+                vec.push(json_to_rune(item)?)?;
+            }
+            rune::to_value(vec)?
+        }
+        JsonValue::Object(map) => {
+            let mut obj = rune::runtime::Object::new();
+            for (k, v) in map {
+                obj.insert(rune::alloc::String::try_from(k.as_str())?, json_to_rune(v)?)?;
+            }
+            rune::to_value(obj)?
+        }
+    })
+}
+
 fn generate(
     pretty: bool,
+    text: bool,
     script: impl AsRef<Path>,
+    input: Option<impl AsRef<Path>>,
     output: Option<impl AsRef<Path>>,
 ) -> anyhow::Result<()> {
     let mut context = Context::with_default_modules()?;
@@ -44,6 +84,7 @@ fn generate(
     let source = Source::from_path(script)?;
     context.install(module()?)?;
     context.install(code_module::module()?)?;
+    context.install(ast_module::module()?)?;
     sources.insert(source)?;
     let mut diagnostics = Diagnostics::new();
 
@@ -62,7 +103,35 @@ fn generate(
 
     let mut vm = Vm::new(runtime.clone(), unit);
 
-    let result = vm.call(rune::Hash::type_hash(["main"]), ())?;
+    // Read the text to parse from a file argument or from stdin.
+    let input_text: Option<String> = match input {
+        Some(path) => Some(std::fs::read_to_string(path)?),
+        None => {
+            let stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                None
+            } else {
+                let mut buf = String::new();
+                stdin.lock().read_to_string(&mut buf)?;
+                Some(buf)
+            }
+        }
+    };
+    let result = if let Some(input_text) = input_text {
+        let input = if text {
+            rune::to_value(input_text)?
+        } else {
+            if let Ok(json) = serde_json::from_str(&input_text) {
+                json_to_rune(json)?
+            } else {
+                rune::to_value(input_text)?
+            }
+        };
+        vm.call(rune::Hash::type_hash(["main"]), (dbg!(input),))?
+    } else {
+        vm.call(rune::Hash::type_hash(["main"]), ())?
+    };
+
     let output_string = value_to_json(result, pretty)?;
     if let Some(output_path) = output {
         std::fs::write(output_path, output_string)?;
@@ -112,6 +181,10 @@ fn value_to_json(value: Value, pretty: bool) -> anyhow::Result<String> {
     try_as!(MatchArm);
     try_as!(PatternField);
 
+    try_as!(AstNode);
+    try_as!(Span);
+    try_as!(Attr);
+
     // Fallback: let Rune serialize primitive Value variants (integers, strings,
     // booleans, vecs, objects, …).
     Ok(if pretty {
@@ -123,20 +196,34 @@ fn value_to_json(value: Value, pretty: bool) -> anyhow::Result<String> {
 
 #[derive(Debug, clap::Parser)]
 struct Cli {
+    /// Pretty-print the JSON output.
     #[clap(short, long)]
     pretty: bool,
+
+    /// Force input to be treated as plain text.
+    #[clap(short, long)]
+    text: bool,
+
+    /// Write output to this file instead of stdout.
     #[clap(short, long)]
     output: Option<PathBuf>,
+
+    /// JSON AST file to pass as the first argument to the script's `main(ast)`.
+    /// When omitted the script is called as `main()` with no arguments.
+    #[clap(short, long)]
+    input: Option<PathBuf>,
+
+    /// The Rune compiler script to run.
     script: PathBuf,
 }
 
 fn main() -> anyhow::Result<()> {
     let Cli {
         pretty,
+        text,
         output,
+        input,
         script,
     } = clap::Parser::parse();
-    generate(pretty, script, output)?;
-    println!("Hello, world!");
-    Ok(())
+    generate(pretty, text, script, input, output)
 }

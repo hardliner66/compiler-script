@@ -1,10 +1,11 @@
-[workspace]
-members = ["compiler-script", "parser-script", "run-script"]
-resolver = "2"
+[package]
+name = "compiler-script"
+version = "0.1.0"
+edition = "2024"
 
-[workspace.dependencies]
+[dependencies]
 rune = "0.14.1"
 anyhow = "1.0.102"
-clap =  "4.6.0"
+clap = { version = "4.6.0", features = ["derive"] }
 serde_json = "1.0.149"
 serde = "1"
