@@ -1,0 +1,105 @@
+/* demo.c — exercises every major feature of the C-like interpreter.
+ *
+ * Run (two steps):
+ *   cargo run --bin parser-script -- --output ast.json \
+ *       --input examples/demo.c parser-script/examples/clang.rn
+ *   cargo run --bin run-script -- --input ast.json \
+ *       run-script/examples/clang.rn
+ */
+
+/* ── Recursive functions ────────────────────────────────────────────────────
+ */
+
+/* Classic recursive Fibonacci: fib(0)=0, fib(1)=1, fib(n)=fib(n-1)+fib(n-2) */
+fn fibonacci(n) {
+  if (n <= 1) {
+    return n;
+  }
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+/* Primality test — trial division up to sqrt(n).
+   Returns true when n has no divisors other than 1 and itself. */
+fn is_prime(n) {
+  if (n < 2) {
+    return false;
+  }
+  let i = 2;
+  while (i * i <= n) {
+    if (n % i == 0) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/* ── Iterative functions ────────────────────────────────────────────────────
+ */
+
+/* Factorial computed iteratively with a while loop. */
+fn factorial(n) {
+  let result = 1;
+  let i = 1;
+  while (i <= n) {
+    result = result * i;
+    i = i + 1;
+  }
+  return result;
+}
+
+/* Sum of the integers 1 through n, also iterative. */
+fn sum(n) {
+  let total = 0;
+  let i = 1;
+  while (i <= n) {
+    total = total + i;
+    i = i + 1;
+  }
+  return total;
+}
+
+/* ── Fibonacci sequence (for loop + recursive call) ──────────────────────── */
+
+print("=== Fibonacci ===");
+for (let i = 0; i <= 10; i = i + 1) {
+  print(fibonacci(i));
+}
+
+/* ── Primes under 50 (for loop + function call + if) ─────────────────────── */
+
+print("=== Primes under 50 ===");
+for (let n = 2; n < 50; n = n + 1) {
+  if (is_prime(n)) {
+    print(n);
+  }
+}
+
+/* ── Factorials 1-10 (for loop + recursive-free call) ────────────────────── */
+
+print("=== Factorials 1-10 ===");
+for (let n = 1; n <= 10; n = n + 1) {
+  print(factorial(n));
+}
+
+/* ── Sum (iterative function call) ───────────────────────────────────────── */
+
+print("=== Sum 1-100 ===");
+print(sum(100));
+
+/* ── FizzBuzz (while loop + if / else if / else) ─────────────────────────── */
+
+print("=== FizzBuzz 1-30 ===");
+let i = 1;
+while (i <= 30) {
+  if (i % 15 == 0) {
+    print("FizzBuzz");
+  } else if (i % 3 == 0) {
+    print("Fizz");
+  } else if (i % 5 == 0) {
+    print("Buzz");
+  } else {
+    print(i);
+  }
+  i = i + 1;
+}

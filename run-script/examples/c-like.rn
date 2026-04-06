@@ -1,0 +1,376 @@
+// clang.rn — tree-walking interpreter for the simple C-like language.
+//
+// The AST is produced by parser-script running parser-script/examples/clang.rn,
+// serialised to JSON, and fed here via `json_to_rune` inside run-script.
+//
+// Usage (two-step):
+//   cargo run --bin parser-script -- --output ast.json \
+//       --input examples/demo.c parser-script/examples/clang.rn
+//   cargo run --bin run-script -- --input ast.json \
+//       run-script/examples/clang.rn
+
+pub fn main(ast) {
+    let fns   = #{};
+    let scope = #{};
+
+    // ── Pass 1: hoist every fn_decl so functions can be called before  ──────
+    // ── their textual position and so they can call each other freely.  ──────
+    for node in ch(ast) {
+        if node["kind"] == "fn_decl" {
+            if let Some(nc) = gn(node, "name") {
+                let name = nval(nc);
+                fns[name] = node;
+            }
+        }
+    }
+
+    // ── Pass 2: execute top-level statements (fn_decls are skipped). ─────────
+    for node in ch(ast) {
+        if node["kind"] != "fn_decl" {
+            exec_stmt(node, scope, fns);
+        }
+    }
+}
+
+// ── Node helpers ──────────────────────────────────────────────────────────────
+
+// Returns the "children" Vec of a node, or an empty Vec when absent.
+fn ch(node) {
+    node.get("children").unwrap_or([])
+}
+
+// Returns the first child of `node` whose "name" field equals `name`,
+// wrapped in Some, or None if no such child exists.
+fn gn(node, name) {
+    for child in ch(node) {
+        if let Some(n) = child.get("name") {
+            if n == name {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+// Returns the "value" string stored on a leaf node, or "" when absent.
+fn nval(node) {
+    node.get("value").unwrap_or("")
+}
+
+// Searches a node's "attrs" list for an attribute with the given key and
+// returns its value string, or "" when not found.
+fn gattr(node, key) {
+    if let Some(attrs) = node.get("attrs") {
+        for attr in attrs {
+            if attr["key"] == key {
+                return attr["value"];
+            }
+        }
+    }
+    ""
+}
+
+// ── Statement execution ───────────────────────────────────────────────────────
+
+// Runs a list of statements in order.
+// Returns None on normal fall-through or Some(v) when a `return` is reached.
+fn exec_stmts(stmts, scope, fns) {
+    for stmt in stmts {
+        let result = exec_stmt(stmt, scope, fns);
+        if result.is_some() {
+            return result;
+        }
+    }
+    None
+}
+
+// Executes one statement node.
+// Returns None on fall-through, Some(v) when `return` is executed.
+//
+// Uses an if/else-if chain on node["kind"] because `match` cannot be applied
+// to Object field values in Rune — only to known string literals.
+fn exec_stmt(node, scope, fns) {
+    let kind = node["kind"];
+
+    if kind == "fn_decl" {
+        // Already registered in the hoisting pass; nothing to do here.
+        None
+
+    } else if kind == "let_stmt" {
+        // let <binding> = <init>;
+        if let Some(b) = gn(node, "binding") {
+            let name = nval(b);
+            let val = if let Some(init) = gn(node, "init") {
+                eval_expr(init, scope, fns)
+            } else {
+                ()
+            };
+            scope[name] = val;
+        }
+        None
+
+    } else if kind == "assign" {
+        // <target> = <value>;
+        if let Some(t) = gn(node, "target") {
+            let name = nval(t);
+            let val = if let Some(v) = gn(node, "value") {
+                eval_expr(v, scope, fns)
+            } else {
+                ()
+            };
+            scope[name] = val;
+        }
+        None
+
+    } else if kind == "return_stmt" {
+        // return [expr];
+        let kids = ch(node);
+        if kids.len() > 0 {
+            Some(eval_expr(kids[0], scope, fns))
+        } else {
+            Some(())
+        }
+
+    } else if kind == "if_stmt" {
+        // if (<cond>) <then> [else <else>]
+        let cond_val = if let Some(c) = gn(node, "cond") {
+            eval_expr(c, scope, fns)
+        } else {
+            false
+        };
+        if cond_val {
+            if let Some(t) = gn(node, "then") {
+                return exec_stmts(ch(t), scope, fns);
+            }
+            None
+        } else if let Some(e) = gn(node, "else") {
+            // The else child is either a "block" (plain else) or another
+            // "if_stmt" (else-if chain) — dispatch to the right handler.
+            if e["kind"] == "block" {
+                exec_stmts(ch(e), scope, fns)
+            } else {
+                exec_stmt(e, scope, fns)
+            }
+        } else {
+            None
+        }
+
+    } else if kind == "while_stmt" {
+        // while (<cond>) <body>
+        loop {
+            let cond_val = if let Some(c) = gn(node, "cond") {
+                eval_expr(c, scope, fns)
+            } else {
+                false
+            };
+            if !cond_val {
+                break;
+            }
+            if let Some(b) = gn(node, "body") {
+                let result = exec_stmts(ch(b), scope, fns);
+                if result.is_some() {
+                    return result;
+                }
+            }
+        }
+        None
+
+    } else if kind == "for_stmt" {
+        // for (<init>; <cond>; <step>) <body>
+        // Execute init once before the loop starts.
+        if let Some(init) = gn(node, "init") {
+            exec_stmt(init, scope, fns);
+        }
+        loop {
+            // Evaluate condition at the top of each iteration.
+            let cond_val = if let Some(c) = gn(node, "cond") {
+                eval_expr(c, scope, fns)
+            } else {
+                false
+            };
+            if !cond_val {
+                break;
+            }
+            // Run the body; bubble up any return signal.
+            if let Some(b) = gn(node, "body") {
+                let result = exec_stmts(ch(b), scope, fns);
+                if result.is_some() {
+                    return result;
+                }
+            }
+            // Execute the step (always an assign statement).
+            if let Some(s) = gn(node, "step") {
+                exec_stmt(s, scope, fns);
+            }
+        }
+        None
+
+    } else if kind == "expr_stmt" {
+        // Expression used as a statement — evaluate and discard the result.
+        let kids = ch(node);
+        if kids.len() > 0 {
+            eval_expr(kids[0], scope, fns);
+        }
+        None
+
+    } else if kind == "block" {
+        // A bare block: execute its children in the current (shared) scope.
+        exec_stmts(ch(node), scope, fns)
+
+    } else {
+        None
+    }
+}
+
+// ── Expression evaluation ─────────────────────────────────────────────────────
+
+// Evaluates an expression node and returns the resulting Rune value.
+fn eval_expr(node, scope, fns) {
+    let kind = node["kind"];
+
+    if kind == "int" {
+        if let Ok(i) = i64::parse(nval(node)) { i } else { 0 }
+
+    } else if kind == "float" {
+        if let Ok(f) = f64::parse(nval(node)) { f } else { 0.0 }
+
+    } else if kind == "string" {
+        nval(node)
+
+    } else if kind == "bool" {
+        nval(node) == "true"
+
+    } else if kind == "ident" {
+        let name = nval(node);
+        if let Some(v) = scope.get(name) {
+            v
+        } else {
+            panic!("undefined variable")
+        }
+
+    } else if kind == "call" {
+        eval_call(node, scope, fns)
+
+    } else if kind == "bin_op" {
+        eval_bin_op(node, scope, fns)
+
+    } else if kind == "un_op" {
+        eval_un_op(node, scope, fns)
+
+    } else if kind == "group" {
+        // Parenthesised sub-expression — evaluate the single inner child.
+        let kids = ch(node);
+        eval_expr(kids[0], scope, fns)
+
+    } else {
+        panic!("unknown expression kind")
+    }
+}
+
+// Evaluates a function-call expression.
+// Built-in functions (print, str) are resolved first; user-defined functions
+// are looked up in `fns` and executed in a fresh, isolated scope.
+fn eval_call(node, scope, fns) {
+    let fn_name = if let Some(c) = gn(node, "callee") {
+        nval(c)
+    } else {
+        panic!("call node has no callee child")
+    };
+
+    // Evaluate all arguments eagerly, left-to-right, in the caller's scope.
+    let arg_exprs = if let Some(a) = gn(node, "args") { ch(a) } else { [] };
+    let arg_vals = [];
+    for ae in arg_exprs {
+        arg_vals.push(eval_expr(ae, scope, fns));
+    }
+
+    // ── Built-in: print ───────────────────────────────────────────────────────
+    if fn_name == "print" {
+        for v in arg_vals {
+            println!("{}", v);
+        }
+        return ();
+    }
+
+    // ── Built-in: str ─────────────────────────────────────────────────────────
+    if fn_name == "str" {
+        return format!("{}", arg_vals[0]);
+    }
+
+    // ── User-defined function ─────────────────────────────────────────────────
+    if let Some(fn_node) = fns.get(fn_name) {
+        // Collect the parameter ident nodes from the fn_decl's "params" child.
+        let param_idents = if let Some(p) = gn(fn_node, "params") { ch(p) } else { [] };
+
+        // Retrieve the body node before param_idents is consumed by the loop.
+        let body = gn(fn_node, "body");
+
+        // Build a fresh scope for this invocation and bind each argument.
+        let fn_scope = #{};
+        let i = 0;
+        for param in param_idents {
+            let pname = nval(param);
+            fn_scope[pname] = arg_vals[i];
+            i = i + 1;
+        }
+
+        // Execute the body; propagate an explicit return value if present.
+        if let Some(b) = body {
+            let result = exec_stmts(ch(b), fn_scope, fns);
+            if let Some(v) = result {
+                return v;
+            }
+        }
+        return ();
+    }
+
+    panic!("undefined function")
+}
+
+// Evaluates a binary-operator expression.
+// && and || are short-circuit: rhs is only evaluated when necessary.
+fn eval_bin_op(node, scope, fns) {
+    let kids = ch(node);
+    let op   = gattr(node, "op");
+
+    // Evaluate lhs first; short-circuit operators may not need rhs at all.
+    let lhs = eval_expr(kids[0], scope, fns);
+
+    if op == "&&" {
+        if !lhs { return false; }
+        return eval_expr(kids[1], scope, fns);
+    }
+    if op == "||" {
+        if lhs { return true; }
+        return eval_expr(kids[1], scope, fns);
+    }
+
+    // All remaining operators require both operands.
+    let rhs = eval_expr(kids[1], scope, fns);
+
+    match op {
+        "+"  => lhs + rhs,
+        "-"  => lhs - rhs,
+        "*"  => lhs * rhs,
+        "/"  => lhs / rhs,
+        "%"  => lhs % rhs,
+        "==" => lhs == rhs,
+        "!=" => lhs != rhs,
+        "<"  => lhs < rhs,
+        "<=" => lhs <= rhs,
+        ">"  => lhs > rhs,
+        ">=" => lhs >= rhs,
+        _    => panic!("unknown binary operator"),
+    }
+}
+
+// Evaluates a unary-operator expression.
+fn eval_un_op(node, scope, fns) {
+    let kids = ch(node);
+    let op   = gattr(node, "op");
+    let val  = eval_expr(kids[0], scope, fns);
+
+    if op == "-" { return -val; }
+    if op == "!" { return !val; }
+    panic!("unknown unary operator")
+}

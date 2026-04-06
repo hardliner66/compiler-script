@@ -1,5 +1,5 @@
 [package]
-name = "compiler-script"
+name = "run-script"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,4 +8,4 @@ rune.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true

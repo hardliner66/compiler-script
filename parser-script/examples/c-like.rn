@@ -1,0 +1,761 @@
+// clang.rn — complete recursive-descent parser for a simple C-like language.
+//
+// Grammar (EBNF):
+//   program     = (fn_decl | stmt)* EOF
+//   fn_decl     = 'fn' IDENT '(' params ')' block
+//   params      = (IDENT (',' IDENT)*)?
+//   block       = '{' stmt* '}'
+//   stmt        = let_stmt | return_stmt | if_stmt | while_stmt | for_stmt
+//               | assign_stmt | expr_stmt
+//   let_stmt    = 'let' IDENT '=' expr ';'
+//   return_stmt = 'return' expr? ';'
+//   if_stmt     = 'if' '(' expr ')' block ('else' (if_stmt | block))?
+//   while_stmt  = 'while' '(' expr ')' block
+//   for_stmt    = 'for' '(' 'let' IDENT '=' expr ';' expr ';' IDENT '=' expr ')' block
+//   assign_stmt = IDENT '=' expr ';'        (lookahead detection)
+//   expr_stmt   = expr ';'
+//   expr        = or_expr
+//   or_expr     = and_expr ('||' and_expr)*
+//   and_expr    = eq_expr ('&&' eq_expr)*
+//   eq_expr     = cmp_expr (('==' | '!=') cmp_expr)?
+//   cmp_expr    = add_expr (('<=' | '>=' | '<' | '>') add_expr)?
+//   add_expr    = mul_expr (('+' | '-') mul_expr)*
+//   mul_expr    = unary (('*' | '/' | '%') unary)*
+//   unary       = ('!' | '-') unary | primary
+//   primary     = INT | FLOAT | STRING | 'true' | 'false'
+//               | IDENT '(' args ')' | IDENT | '(' expr ')'
+//   args        = (expr (',' expr)*)?
+//
+// Comments: // to end of line, /* */ block (not nested).
+//
+// Usage:
+//   cargo run --bin parser-script -- --pretty --input demo.c examples/clang.rn
+
+pub fn main(input) {
+    let s = ast::scanner(input);
+    parse_program(s)
+}
+
+// ── Whitespace / comment skipping ────────────────────────────────────────────
+//
+// Loops until no more whitespace or comments can be skipped.
+
+fn skip_ws(s) {
+    loop {
+        s.skip_whitespace();
+        if s.skip_line_comment("//") {
+            continue;
+        }
+        if s.skip_block_comment("/*", "*/") {
+            continue;
+        }
+        break;
+    }
+}
+
+// ── Keyword detection ─────────────────────────────────────────────────────────
+//
+// Returns true when the scanner is sitting exactly at `kw` AND the character
+// immediately after it is a token boundary (whitespace, a delimiter) or EOF.
+// This prevents "while" from matching inside "whileLoop", for example.
+
+fn is_kw(s, kw) {
+    // Compute n BEFORE passing kw to match_str — in Rune, String arguments are
+    // moved into the callee, so kw would be inaccessible after match_str(kw).
+    let n = kw.len();
+    if !s.match_str(kw) {
+        return false;
+    }
+    let lookahead = s.peek_str(n + 1);
+    // If lookahead is no longer than the keyword itself, we are at EOF.
+    if lookahead.len() <= n {
+        return true;
+    }
+    let chars = [];
+    for c in lookahead.chars() {
+        chars.push(c);
+    }
+    let after = chars[n];
+    after == ' '  || after == '\t' || after == '\n' || after == '\r' ||
+    after == '('  || after == ')'  || after == '{'  || after == '}'  ||
+    after == ';'  || after == ','
+}
+
+// ── Assignment-statement lookahead ───────────────────────────────────────────
+//
+// Peeks at the remaining input and returns true when it matches the pattern
+//   IDENT  ws*  '='  (not '==')
+// Used to tell apart   assign_stmt  from  expr_stmt.
+
+fn is_assign_stmt(s) {
+    let rem = s.remaining();
+    let chars = [];
+    for c in rem.chars() {
+        chars.push(c);
+    }
+    let n = 0;
+    if chars.len() == 0 {
+        return false;
+    }
+    let first = chars[0];
+    if !(first.is_alphabetic() || first == '_') {
+        return false;
+    }
+    // Skip the identifier.
+    while n < chars.len() && (chars[n].is_alphanumeric() || chars[n] == '_') {
+        n = n + 1;
+    }
+    // Skip optional whitespace.
+    while n < chars.len() && chars[n].is_whitespace() {
+        n = n + 1;
+    }
+    // Must be '=' not followed by another '='.
+    if n + 1 < chars.len() {
+        chars[n] == '=' && chars[n + 1] != '='
+    } else if n < chars.len() {
+        chars[n] == '='
+    } else {
+        false
+    }
+}
+
+// ── Program ───────────────────────────────────────────────────────────────────
+//
+// program = (fn_decl | stmt)* EOF
+
+fn parse_program(s) {
+    let items = [];
+    loop {
+        skip_ws(s);
+        if s.is_done() {
+            break;
+        }
+        if is_kw(s, "fn") {
+            items.push(parse_fn_decl(s));
+        } else {
+            items.push(parse_stmt(s));
+        }
+    }
+    ast::node("program", items)
+}
+
+// ── Function declaration ──────────────────────────────────────────────────────
+//
+// fn_decl = 'fn' IDENT '(' params ')' block
+//
+// AST: kind="fn_decl"
+//        named_leaf("name","ident", fn_name)
+//        named_node("params","params", [leaf("ident",p)*])
+//        named_node("body","block",   [stmt*])
+
+fn parse_fn_decl(s) {
+    skip_ws(s);
+    s.expect_str("fn")?;
+    skip_ws(s);
+
+    // Capture the function name as a named leaf with a span.
+    let n_start     = s.pos();
+    let n_start_ln  = s.line_num();
+    let n_start_col = s.col_num();
+    let fn_name     = s.read_ident();
+    let n_span      = s.span_from(n_start, n_start_ln, n_start_col);
+    let name_leaf   = ast::named_leaf("name", "ident", fn_name).with_span(n_span);
+
+    skip_ws(s);
+    s.expect_str("(")?;
+    let param_leaves = parse_params(s);
+    skip_ws(s);
+    s.expect_str(")")?;
+
+    let params_node = ast::named_node("params", "params", param_leaves);
+
+    let body_stmts = parse_block(s);
+    let body_node  = ast::named_node("body", "block", body_stmts);
+
+    ast::node("fn_decl", [name_leaf, params_node, body_node])
+}
+
+// ── Parameters ────────────────────────────────────────────────────────────────
+//
+// params = (IDENT (',' IDENT)*)?
+// Returns a Vec<AstNode> of leaf("ident", name) nodes.
+
+fn parse_params(s) {
+    let params = [];
+    skip_ws(s);
+    if s.match_str(")") || s.is_done() {
+        return params;
+    }
+    // First parameter.
+    let p_start     = s.pos();
+    let p_start_ln  = s.line_num();
+    let p_start_col = s.col_num();
+    let p_name      = s.read_ident();
+    let p_span      = s.span_from(p_start, p_start_ln, p_start_col);
+    params.push(ast::leaf("ident", p_name).with_span(p_span));
+    // Additional parameters separated by commas.
+    loop {
+        skip_ws(s);
+        if !s.consume_str(",") {
+            break;
+        }
+        skip_ws(s);
+        let p_start     = s.pos();
+        let p_start_ln  = s.line_num();
+        let p_start_col = s.col_num();
+        let p_name      = s.read_ident();
+        let p_span      = s.span_from(p_start, p_start_ln, p_start_col);
+        params.push(ast::leaf("ident", p_name).with_span(p_span));
+    }
+    params
+}
+
+// ── Block ─────────────────────────────────────────────────────────────────────
+//
+// block = '{' stmt* '}'
+// Returns a Vec<AstNode> (the statement children).
+// Callers wrap it: ast::named_node("body", "block", parse_block(s)).
+
+fn parse_block(s) {
+    skip_ws(s);
+    s.expect_str("{")?;
+    let stmts = [];
+    loop {
+        skip_ws(s);
+        if s.consume_str("}") {
+            break;
+        }
+        if s.is_done() {
+            break;
+        }
+        stmts.push(parse_stmt(s));
+    }
+    stmts
+}
+
+// ── Statement dispatch ────────────────────────────────────────────────────────
+//
+// stmt = let_stmt | return_stmt | if_stmt | while_stmt | for_stmt
+//      | assign_stmt | expr_stmt
+
+fn parse_stmt(s) {
+    skip_ws(s);
+    if is_kw(s, "let") {
+        parse_let_stmt(s)
+    } else if is_kw(s, "return") {
+        parse_return_stmt(s)
+    } else if is_kw(s, "if") {
+        parse_if_stmt(s)
+    } else if is_kw(s, "while") {
+        parse_while_stmt(s)
+    } else if is_kw(s, "for") {
+        parse_for_stmt(s)
+    } else if is_assign_stmt(s) {
+        parse_assign_stmt(s)
+    } else {
+        parse_expr_stmt(s)
+    }
+}
+
+// ── let_stmt ──────────────────────────────────────────────────────────────────
+//
+// let_stmt = 'let' IDENT '=' expr ';'
+//
+// AST: kind="let_stmt"
+//        named_leaf("binding","ident", var_name)
+//        init_expr.with_name("init")
+
+fn parse_let_stmt(s) {
+    skip_ws(s);
+    s.expect_str("let")?;
+    skip_ws(s);
+
+    let b_start     = s.pos();
+    let b_start_ln  = s.line_num();
+    let b_start_col = s.col_num();
+    let var_name    = s.read_ident();
+    let b_span      = s.span_from(b_start, b_start_ln, b_start_col);
+    let binding     = ast::named_leaf("binding", "ident", var_name).with_span(b_span);
+
+    skip_ws(s);
+    s.expect_str("=")?;
+    skip_ws(s);
+    let init = parse_expr(s).with_name("init");
+    skip_ws(s);
+    s.expect_str(";")?;
+
+    ast::node("let_stmt", [binding, init])
+}
+
+// ── return_stmt ───────────────────────────────────────────────────────────────
+//
+// return_stmt = 'return' expr? ';'
+//
+// AST: kind="return_stmt", children=[expr?]
+
+fn parse_return_stmt(s) {
+    skip_ws(s);
+    s.expect_str("return")?;
+    skip_ws(s);
+    let children = [];
+    if !s.consume_str(";") {
+        // There is a return value expression.
+        let expr = parse_expr(s);
+        children.push(expr);
+        skip_ws(s);
+        s.expect_str(";")?;
+    }
+    ast::node("return_stmt", children)
+}
+
+// ── if_stmt ───────────────────────────────────────────────────────────────────
+//
+// if_stmt = 'if' '(' expr ')' block ('else' (if_stmt | block))?
+//
+// AST: kind="if_stmt"
+//        cond.with_name("cond")
+//        named_node("then","block",[stmt*])
+//        named_node("else","block",[stmt*])   -- or --
+//        else_if_node.with_name("else")       -- for else-if chains
+
+fn parse_if_stmt(s) {
+    skip_ws(s);
+    s.expect_str("if")?;
+    skip_ws(s);
+    s.expect_str("(")?;
+    skip_ws(s);
+    let cond      = parse_expr(s).with_name("cond");
+    skip_ws(s);
+    s.expect_str(")")?;
+
+    let then_stmts = parse_block(s);
+    let then_node  = ast::named_node("then", "block", then_stmts);
+
+    let children = [];
+    children.push(cond);
+    children.push(then_node);
+
+    skip_ws(s);
+    if is_kw(s, "else") {
+        s.expect_str("else")?;
+        skip_ws(s);
+        if is_kw(s, "if") {
+            // else-if: recurse and label the child with "else".
+            let else_if = parse_if_stmt(s).with_name("else");
+            children.push(else_if);
+        } else {
+            // Plain else block.
+            let else_stmts = parse_block(s);
+            let else_node  = ast::named_node("else", "block", else_stmts);
+            children.push(else_node);
+        }
+    }
+
+    ast::node("if_stmt", children)
+}
+
+// ── while_stmt ────────────────────────────────────────────────────────────────
+//
+// while_stmt = 'while' '(' expr ')' block
+//
+// AST: kind="while_stmt"
+//        cond.with_name("cond")
+//        named_node("body","block",[stmt*])
+
+fn parse_while_stmt(s) {
+    skip_ws(s);
+    s.expect_str("while")?;
+    skip_ws(s);
+    s.expect_str("(")?;
+    skip_ws(s);
+    let cond = parse_expr(s).with_name("cond");
+    skip_ws(s);
+    s.expect_str(")")?;
+
+    let body_stmts = parse_block(s);
+    let body_node  = ast::named_node("body", "block", body_stmts);
+
+    ast::node("while_stmt", [cond, body_node])
+}
+
+// ── for_stmt ──────────────────────────────────────────────────────────────────
+//
+// for_stmt = 'for' '(' 'let' IDENT '=' expr ';' expr ';' IDENT '=' expr ')' block
+//
+// AST: kind="for_stmt"
+//        let_stmt_node.with_name("init")
+//        cond.with_name("cond")
+//        assign_node.with_name("step")
+//        named_node("body","block",[stmt*])
+
+fn parse_for_stmt(s) {
+    skip_ws(s);
+    s.expect_str("for")?;
+    skip_ws(s);
+    s.expect_str("(")?;
+
+    // ── Init: 'let' IDENT '=' expr ';' ───────────────────────────────────────
+    skip_ws(s);
+    s.expect_str("let")?;
+    skip_ws(s);
+
+    let ib_start     = s.pos();
+    let ib_start_ln  = s.line_num();
+    let ib_start_col = s.col_num();
+    let init_var     = s.read_ident();
+    let ib_span      = s.span_from(ib_start, ib_start_ln, ib_start_col);
+    let init_binding = ast::named_leaf("binding", "ident", init_var).with_span(ib_span);
+
+    skip_ws(s);
+    s.expect_str("=")?;
+    skip_ws(s);
+    let init_val  = parse_expr(s).with_name("init");
+    skip_ws(s);
+    s.expect_str(";")?;
+
+    let init_node = ast::node("let_stmt", [init_binding, init_val]).with_name("init");
+
+    // ── Condition: expr ';' ───────────────────────────────────────────────────
+    skip_ws(s);
+    let cond = parse_expr(s).with_name("cond");
+    skip_ws(s);
+    s.expect_str(";")?;
+
+    // ── Step: IDENT '=' expr   (no semicolon — closed by ')') ────────────────
+    skip_ws(s);
+    let st_start     = s.pos();
+    let st_start_ln  = s.line_num();
+    let st_start_col = s.col_num();
+    let step_var     = s.read_ident();
+    let st_span      = s.span_from(st_start, st_start_ln, st_start_col);
+    let step_target  = ast::leaf("ident", step_var).with_span(st_span).with_name("target");
+
+    skip_ws(s);
+    s.expect_str("=")?;
+    skip_ws(s);
+    let step_val  = parse_expr(s).with_name("value");
+    let step_node = ast::node("assign", [step_target, step_val]).with_name("step");
+
+    skip_ws(s);
+    s.expect_str(")")?;
+
+    let body_stmts = parse_block(s);
+    let body_node  = ast::named_node("body", "block", body_stmts);
+
+    ast::node("for_stmt", [init_node, cond, step_node, body_node])
+}
+
+// ── assign_stmt ───────────────────────────────────────────────────────────────
+//
+// assign_stmt = IDENT '=' expr ';'
+//
+// AST: kind="assign"
+//        leaf("ident", name).with_name("target")
+//        val_expr.with_name("value")
+
+fn parse_assign_stmt(s) {
+    skip_ws(s);
+
+    let t_start     = s.pos();
+    let t_start_ln  = s.line_num();
+    let t_start_col = s.col_num();
+    let name        = s.read_ident();
+    let t_span      = s.span_from(t_start, t_start_ln, t_start_col);
+    let target      = ast::leaf("ident", name).with_span(t_span).with_name("target");
+
+    skip_ws(s);
+    s.expect_str("=")?;
+    skip_ws(s);
+    let value = parse_expr(s).with_name("value");
+    skip_ws(s);
+    s.expect_str(";")?;
+
+    ast::node("assign", [target, value])
+}
+
+// ── expr_stmt ─────────────────────────────────────────────────────────────────
+//
+// expr_stmt = expr ';'
+//
+// AST: kind="expr_stmt", children=[expr]
+
+fn parse_expr_stmt(s) {
+    skip_ws(s);
+    let expr = parse_expr(s);
+    skip_ws(s);
+    s.expect_str(";")?;
+    ast::node("expr_stmt", [expr])
+}
+
+// ── Expressions ───────────────────────────────────────────────────────────────
+//
+// expr = or_expr   (no assignment in expressions)
+
+fn parse_expr(s) {
+    skip_ws(s);
+    parse_or_expr(s)
+}
+
+// or_expr = and_expr ('||' and_expr)*
+
+fn parse_or_expr(s) {
+    let lhs = parse_and_expr(s);
+    loop {
+        skip_ws(s);
+        if s.consume_str("||") {
+            skip_ws(s);
+            let rhs = parse_and_expr(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "||");
+        } else {
+            break;
+        }
+    }
+    lhs
+}
+
+// and_expr = eq_expr ('&&' eq_expr)*
+
+fn parse_and_expr(s) {
+    let lhs = parse_eq_expr(s);
+    loop {
+        skip_ws(s);
+        if s.consume_str("&&") {
+            skip_ws(s);
+            let rhs = parse_eq_expr(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "&&");
+        } else {
+            break;
+        }
+    }
+    lhs
+}
+
+// eq_expr = cmp_expr (('==' | '!=') cmp_expr)?
+//
+// Check '==' before any single '='; check '!=' before bare '!'.
+
+fn parse_eq_expr(s) {
+    let lhs = parse_cmp_expr(s);
+    skip_ws(s);
+    if s.consume_str("==") {
+        skip_ws(s);
+        let rhs = parse_cmp_expr(s);
+        lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "==");
+    } else if s.consume_str("!=") {
+        skip_ws(s);
+        let rhs = parse_cmp_expr(s);
+        lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "!=");
+    }
+    lhs
+}
+
+// cmp_expr = add_expr (('<=' | '>=' | '<' | '>') add_expr)?
+//
+// Check '<=' before '<'; check '>=' before '>'.
+
+fn parse_cmp_expr(s) {
+    let lhs = parse_add_expr(s);
+    skip_ws(s);
+    if s.consume_str("<=") {
+        skip_ws(s);
+        let rhs = parse_add_expr(s);
+        lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "<=");
+    } else if s.consume_str(">=") {
+        skip_ws(s);
+        let rhs = parse_add_expr(s);
+        lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", ">=");
+    } else if s.consume_str("<") {
+        skip_ws(s);
+        let rhs = parse_add_expr(s);
+        lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "<");
+    } else if s.consume_str(">") {
+        skip_ws(s);
+        let rhs = parse_add_expr(s);
+        lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", ">");
+    }
+    lhs
+}
+
+// add_expr = mul_expr (('+' | '-') mul_expr)*
+
+fn parse_add_expr(s) {
+    let lhs = parse_mul_expr(s);
+    loop {
+        skip_ws(s);
+        if s.consume_str("+") {
+            skip_ws(s);
+            let rhs = parse_mul_expr(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "+");
+        } else if s.consume_str("-") {
+            skip_ws(s);
+            let rhs = parse_mul_expr(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "-");
+        } else {
+            break;
+        }
+    }
+    lhs
+}
+
+// mul_expr = unary (('*' | '/' | '%') unary)*
+
+fn parse_mul_expr(s) {
+    let lhs = parse_unary(s);
+    loop {
+        skip_ws(s);
+        if s.consume_str("*") {
+            skip_ws(s);
+            let rhs = parse_unary(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "*");
+        } else if s.consume_str("/") {
+            skip_ws(s);
+            let rhs = parse_unary(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "/");
+        } else if s.consume_str("%") {
+            skip_ws(s);
+            let rhs = parse_unary(s);
+            lhs = ast::node("bin_op", [lhs, rhs]).with_attr("op", "%");
+        } else {
+            break;
+        }
+    }
+    lhs
+}
+
+// unary = ('!' | '-') unary | primary
+//
+// Both '!' and '-' are right-associative via recursion.
+// '-' is consumed as unary regardless of what follows — do NOT peek at the
+// next character; the caller (parse_add_expr) has already decided this '-'
+// is unary rather than binary.
+
+fn parse_unary(s) {
+    skip_ws(s);
+    if s.consume_str("!") {
+        skip_ws(s);
+        let operand = parse_unary(s);
+        ast::node("un_op", [operand]).with_attr("op", "!")
+    } else if s.consume_str("-") {
+        skip_ws(s);
+        let operand = parse_unary(s);
+        ast::node("un_op", [operand]).with_attr("op", "-")
+    } else {
+        parse_primary(s)
+    }
+}
+
+// primary = INT | FLOAT | STRING | 'true' | 'false'
+//         | IDENT '(' args ')' | IDENT | '(' expr ')'
+//
+// Longer keywords / operators are always tried before shorter ones.
+// Every leaf node gets a source span.
+
+fn parse_primary(s) {
+    skip_ws(s);
+
+    // ── Grouped sub-expression ────────────────────────────────────────────────
+    if s.consume_str("(") {
+        let inner = parse_expr(s);
+        skip_ws(s);
+        s.expect_str(")")?;
+        return ast::node("group", [inner]);
+    }
+
+    // ── String literal ────────────────────────────────────────────────────────
+    // read_quoted('"') handles the opening quote, content (with escapes), and
+    // the closing quote; the returned value is the unescaped content.
+    if s.match_str("\"") {
+        let start      = s.pos();
+        let start_line = s.line_num();
+        let start_col  = s.col_num();
+        let value      = s.read_quoted('"');
+        let span       = s.span_from(start, start_line, start_col);
+        return ast::leaf("string", value).with_span(span);
+    }
+
+    // ── Numeric literal ───────────────────────────────────────────────────────
+    // read_number() reads [0-9]+(.[0-9]+)?; a dot makes it a float.
+    if s.is_digit() {
+        let start      = s.pos();
+        let start_line = s.line_num();
+        let start_col  = s.col_num();
+        let num        = s.read_number();
+        let span       = s.span_from(start, start_line, start_col);
+        if num.contains(".") {
+            return ast::leaf("float", num).with_span(span);
+        } else {
+            return ast::leaf("int", num).with_span(span);
+        }
+    }
+
+    // ── Boolean literals and identifiers ─────────────────────────────────────
+    if s.is_alpha() {
+        // 'true'
+        if is_kw(s, "true") {
+            let start      = s.pos();
+            let start_line = s.line_num();
+            let start_col  = s.col_num();
+            s.expect_str("true")?;
+            let span = s.span_from(start, start_line, start_col);
+            return ast::leaf("bool", "true").with_span(span);
+        }
+
+        // 'false'
+        if is_kw(s, "false") {
+            let start      = s.pos();
+            let start_line = s.line_num();
+            let start_col  = s.col_num();
+            s.expect_str("false")?;
+            let span = s.span_from(start, start_line, start_col);
+            return ast::leaf("bool", "false").with_span(span);
+        }
+
+        // IDENT '(' args ')'  — function call
+        // IDENT               — variable reference
+        let start      = s.pos();
+        let start_line = s.line_num();
+        let start_col  = s.col_num();
+        let name       = s.read_ident();
+        let span       = s.span_from(start, start_line, start_col);
+
+        skip_ws(s);
+        if s.consume_str("(") {
+            // Function call: callee leaf + args node.
+            let callee    = ast::named_leaf("callee", "ident", name).with_span(span);
+            let arg_nodes = parse_args(s);
+            skip_ws(s);
+            s.expect_str(")")?;
+            let args_node = ast::named_node("args", "args", arg_nodes);
+            return ast::node("call", [callee, args_node]);
+        } else {
+            return ast::leaf("ident", name).with_span(span);
+        }
+    }
+
+    // ── Unrecognised input ────────────────────────────────────────────────────
+    let got = s.peek_str(8);
+    ast::leaf("error", `unexpected: ${got}`)
+}
+
+// ── Arguments ─────────────────────────────────────────────────────────────────
+//
+// args = (expr (',' expr)*)?
+// Returns a Vec<AstNode> of expression nodes.
+
+fn parse_args(s) {
+    let args = [];
+    skip_ws(s);
+    if s.match_str(")") || s.is_done() {
+        return args;
+    }
+    args.push(parse_expr(s));
+    loop {
+        skip_ws(s);
+        if !s.consume_str(",") {
+            break;
+        }
+        skip_ws(s);
+        args.push(parse_expr(s));
+    }
+    args
+}
