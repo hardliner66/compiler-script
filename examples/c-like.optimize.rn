@@ -1,0 +1,415 @@
+// c-like.optimize.rn — AST optimiser pass for the simple C-like language.
+//
+// Sits between c-like.parse.rn and c-like.run.rn in the pipeline:
+//
+//   # 1 – parse source to an AST JSON
+//   cargo run --bin parser-script -- \
+//       --input examples/demo.c-like --output ast.json \
+//       examples/c-like.parse.rn
+//
+//   # 2 – optimise (this script) — reads the AST, returns an optimised copy
+//   cargo run --bin run-script -- \
+//       --input ast.json --output opt.json \
+//       examples/c-like.optimize.rn
+//
+//   # 3 – execute the optimised AST
+//   cargo run --bin run-script -- \
+//       --input opt.json \
+//       examples/c-like.run.rn
+//
+// Optimisations performed (all semantics-preserving):
+//
+//   1. Constant folding
+//        Arithmetic  : 2 + 3   → 5,   6 * 7   → 42,  10 / 2 → 5
+//        Comparison  : 3 < 5   → true, 4 == 4 → true
+//        Boolean     : true && false → false, true || false → true
+//
+//   2. Algebraic identity / absorber simplification
+//        x + 0  → x        0 + x  → x        x - 0  → x
+//        x * 1  → x        1 * x  → x
+//        x * 0  → 0        0 * x  → 0
+//        x / 1  → x
+//        x && true  → x    true && x  → x
+//        x && false → false            false && x → false
+//        x || false → x    false || x → x
+//        x || true  → true             true || x  → true
+//
+//   3. Double-negation elimination
+//        !!x  → x          -(-x) → x
+//
+//   4. Dead-branch elimination  (constant if-conditions)
+//        if (true)  { A } else { B }  → A
+//        if (false) { A } else { B }  → B
+//        if (false) { A }             → (empty block / no-op)
+//
+//   5. Unreachable-code elimination
+//        Statements after a `return` inside a block are removed.
+//
+//   6. Constant loop elimination
+//        while (false) { … }          → (empty block / no-op)
+//        for (…; false; …)  { … }     → (empty block / no-op)
+//
+// The optimiser makes multiple passes (currently two) because one round of
+// constant folding can unlock further simplifications — e.g. folding a
+// sub-expression to `false` may then let a parent `&&` be simplified.
+
+pub fn main(ast) {
+    // Two optimisation passes: one round often enables the next.
+    let pass1 = opt(ast);
+    opt(pass1)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AST node helpers  (identical API to c-like.run.rn)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Returns the children Vec of `node`, or [] when absent.
+fn ch(node) {
+    node.get("children").unwrap_or([])
+}
+
+// Returns the first child whose "name" field equals `role`, or None.
+fn gn(node, role) {
+    for child in ch(node) {
+        if let Some(n) = child.get("name") {
+            if n == role {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+// Returns the leaf "value" string, or "" when absent.
+fn nval(node) {
+    node.get("value").unwrap_or("")
+}
+
+// Returns the value of the attribute whose key equals `key`, or "".
+fn gattr(node, key) {
+    if let Some(attrs) = node.get("attrs") {
+        for attr in attrs {
+            if attr["key"] == key {
+                return attr["value"];
+            }
+        }
+    }
+    ""
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Node-construction helpers
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Shallow-copy `node` replacing its children with `new_children`.
+// All metadata fields (kind, name, value, span, attrs) are preserved.
+fn rebuild(node, new_children) {
+    let n = #{"kind": node["kind"]};
+    if let Some(nm) = node.get("name")  { n["name"]  = nm; }
+    if let Some(vl) = node.get("value") { n["value"] = vl; }
+    if let Some(sp) = node.get("span")  { n["span"]  = sp; }
+    if let Some(at) = node.get("attrs") { n["attrs"] = at; }
+    if new_children.len() > 0 {
+        n["children"] = new_children;
+    }
+    n
+}
+
+// Make a new integer-literal node, inheriting name/span from `orig`.
+fn lit_int(orig, val) {
+    let n = #{"kind": "int", "value": format!("{}", val)};
+    if let Some(nm) = orig.get("name") { n["name"] = nm; }
+    if let Some(sp) = orig.get("span") { n["span"] = sp; }
+    n
+}
+
+// Make a new float-literal node, inheriting name/span from `orig`.
+fn lit_float(orig, val) {
+    let n = #{"kind": "float", "value": format!("{}", val)};
+    if let Some(nm) = orig.get("name") { n["name"] = nm; }
+    if let Some(sp) = orig.get("span") { n["span"] = sp; }
+    n
+}
+
+// Make a new boolean-literal node, inheriting name/span from `orig`.
+fn lit_bool(orig, val) {
+    let n = #{"kind": "bool", "value": if val { "true" } else { "false" }};
+    if let Some(nm) = orig.get("name") { n["name"] = nm; }
+    if let Some(sp) = orig.get("span") { n["span"] = sp; }
+    n
+}
+
+// Make an empty block node (represents a removed branch / loop).
+fn empty_block(orig) {
+    let n = #{"kind": "block"};
+    if let Some(nm) = orig.get("name") { n["name"] = nm; }
+    n
+}
+
+// Return `node` but with its "name" field replaced by `name_opt`.
+// Used when a child is promoted to take the place of its parent in the tree
+// so that the grandparent can still find it by its expected role name.
+fn adopt_name(node, name_opt) {
+    if let Some(nm) = name_opt {
+        let n = rebuild(node, ch(node));
+        n["name"] = nm;
+        return n;
+    }
+    node
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Core optimiser — bottom-up single pass
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Recursively optimise `node`.
+//
+// Children are always processed before the parent (bottom-up), so each
+// transformation rule can assume its sub-trees are already in their
+// simplest form.
+fn opt(node) {
+    let kind = node["kind"];
+
+    // ── Leaf nodes carry no sub-expressions; return unchanged ────────────────
+    if kind == "int"    { return node; }
+    if kind == "float"  { return node; }
+    if kind == "string" { return node; }
+    if kind == "bool"   { return node; }
+    if kind == "ident"  { return node; }
+
+    // ── Recursively optimise every child first ───────────────────────────────
+    let opt_kids = [];
+    for child in ch(node) {
+        opt_kids.push(opt(child));
+    }
+    let node2 = rebuild(node, opt_kids);
+
+    // ── Apply node-kind-specific optimisations ───────────────────────────────
+    if kind == "bin_op"      { return opt_bin_op(node2); }
+    if kind == "un_op"       { return opt_un_op(node2);  }
+    if kind == "if_stmt"     { return opt_if(node2);     }
+    if kind == "while_stmt"  { return opt_while(node2);  }
+    if kind == "for_stmt"    { return opt_for(node2);    }
+
+    // Blocks and fn bodies: remove unreachable code after a return.
+    if kind == "block" || kind == "fn_decl" {
+        return elim_dead_after_return(node2);
+    }
+
+    node2
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Binary-operator optimisations
+// ══════════════════════════════════════════════════════════════════════════════
+
+fn opt_bin_op(node) {
+    let kids = ch(node);
+    let lhs  = kids[0];
+    let rhs  = kids[1];
+    let lk   = lhs["kind"];
+    let rk   = rhs["kind"];
+    let op   = gattr(node, "op");
+    let lv   = nval(lhs);
+    let rv   = nval(rhs);
+
+    // ── (A) Integer × Integer constant folding ───────────────────────────────
+    if lk == "int" && rk == "int" {
+        if let Ok(li) = i64::parse(lv) {
+            if let Ok(ri) = i64::parse(rv) {
+                if op == "+"  { return lit_int(node, li + ri); }
+                if op == "-"  { return lit_int(node, li - ri); }
+                if op == "*"  { return lit_int(node, li * ri); }
+                if op == "/" && ri != 0 { return lit_int(node, li / ri); }
+                if op == "%" && ri != 0 { return lit_int(node, li % ri); }
+                if op == "==" { return lit_bool(node, li == ri); }
+                if op == "!=" { return lit_bool(node, li != ri); }
+                if op == "<"  { return lit_bool(node, li <  ri); }
+                if op == "<=" { return lit_bool(node, li <= ri); }
+                if op == ">"  { return lit_bool(node, li >  ri); }
+                if op == ">=" { return lit_bool(node, li >= ri); }
+            }
+        }
+    }
+
+    // ── (B) Float constant folding (at least one operand is float) ───────────
+    if (lk == "float" || lk == "int") && (rk == "float" || rk == "int")
+    && (lk == "float" || rk == "float") {
+        if let Ok(lf) = f64::parse(lv) {
+            if let Ok(rf) = f64::parse(rv) {
+                if op == "+"  { return lit_float(node, lf + rf); }
+                if op == "-"  { return lit_float(node, lf - rf); }
+                if op == "*"  { return lit_float(node, lf * rf); }
+                if op == "/" && rf != 0.0 { return lit_float(node, lf / rf); }
+                if op == "==" { return lit_bool(node, lf == rf); }
+                if op == "!=" { return lit_bool(node, lf != rf); }
+                if op == "<"  { return lit_bool(node, lf <  rf); }
+                if op == "<=" { return lit_bool(node, lf <= rf); }
+                if op == ">"  { return lit_bool(node, lf >  rf); }
+                if op == ">=" { return lit_bool(node, lf >= rf); }
+            }
+        }
+    }
+
+    // ── (C) Boolean constant folding ─────────────────────────────────────────
+    if lk == "bool" && rk == "bool" {
+        let lb = lv == "true";
+        let rb = rv == "true";
+        if op == "&&" { return lit_bool(node, lb && rb); }
+        if op == "||" { return lit_bool(node, lb || rb); }
+        if op == "==" { return lit_bool(node, lb == rb); }
+        if op == "!=" { return lit_bool(node, lb != rb); }
+    }
+
+    // ── (D) Algebraic identity rules (integer operands only) ─────────────────
+    //
+    // These only apply when the constant side is an integer literal so we
+    // avoid any ambiguity with float representation.
+
+    // Additive identity:  x + 0 → x,  0 + x → x,  x - 0 → x
+    if op == "+" || op == "-" {
+        if rk == "int" && rv == "0" {
+            return adopt_name(lhs, node.get("name"));
+        }
+        if op == "+" && lk == "int" && lv == "0" {
+            return adopt_name(rhs, node.get("name"));
+        }
+    }
+
+    // Multiplicative identity:  x * 1 → x,  1 * x → x
+    // Multiplicative absorber:  x * 0 → 0,  0 * x → 0
+    // Division identity:        x / 1 → x
+    if op == "*" {
+        if rk == "int" && rv == "1" { return adopt_name(lhs, node.get("name")); }
+        if lk == "int" && lv == "1" { return adopt_name(rhs, node.get("name")); }
+        if rk == "int" && rv == "0" { return lit_int(node, 0); }
+        if lk == "int" && lv == "0" { return lit_int(node, 0); }
+    }
+    if op == "/" && rk == "int" && rv == "1" {
+        return adopt_name(lhs, node.get("name"));
+    }
+
+    // Boolean identity / absorber
+    //   x && true  → x       true && x  → x
+    //   x && false → false   false && x → false
+    //   x || false → x       false || x → x
+    //   x || true  → true    true || x  → true
+    if op == "&&" {
+        if rk == "bool" && rv == "true"  { return adopt_name(lhs, node.get("name")); }
+        if lk == "bool" && lv == "true"  { return adopt_name(rhs, node.get("name")); }
+        if rk == "bool" && rv == "false" { return lit_bool(node, false); }
+        if lk == "bool" && lv == "false" { return lit_bool(node, false); }
+    }
+    if op == "||" {
+        if rk == "bool" && rv == "false" { return adopt_name(lhs, node.get("name")); }
+        if lk == "bool" && lv == "false" { return adopt_name(rhs, node.get("name")); }
+        if rk == "bool" && rv == "true"  { return lit_bool(node, true); }
+        if lk == "bool" && lv == "true"  { return lit_bool(node, true); }
+    }
+
+    node
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Unary-operator optimisations
+// ══════════════════════════════════════════════════════════════════════════════
+
+fn opt_un_op(node) {
+    let kids    = ch(node);
+    let operand = kids[0];
+    let ok      = operand["kind"];
+    let op      = gattr(node, "op");
+    let ov      = nval(operand);
+
+    // ── Constant folding ──────────────────────────────────────────────────────
+    if op == "!" && ok == "bool" {
+        return lit_bool(node, !(ov == "true"));
+    }
+    if op == "-" && ok == "int" {
+        if let Ok(i) = i64::parse(ov) {
+            return lit_int(node, -i);
+        }
+    }
+    if op == "-" && ok == "float" {
+        if let Ok(f) = f64::parse(ov) {
+            return lit_float(node, -f);
+        }
+    }
+
+    // ── Double-negation elimination:  !!x → x,  -(-x) → x ───────────────────
+    if ok == "un_op" {
+        let inner_op = gattr(operand, "op");
+        if inner_op == op {
+            let inner = ch(operand)[0];
+            return adopt_name(inner, node.get("name"));
+        }
+    }
+
+    node
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Control-flow optimisations
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Dead-branch elimination for constant if-conditions.
+fn opt_if(node) {
+    if let Some(cond) = gn(node, "cond") {
+        if cond["kind"] == "bool" {
+            if nval(cond) == "true" {
+                // if (true) { A } [else …] → A
+                if let Some(then_n) = gn(node, "then") {
+                    return adopt_name(then_n, node.get("name"));
+                }
+            } else {
+                // if (false) { A } else { B } → B
+                if let Some(else_n) = gn(node, "else") {
+                    return adopt_name(else_n, node.get("name"));
+                }
+                // if (false) { A }  (no else) → empty block (no-op)
+                return empty_block(node);
+            }
+        }
+    }
+    node
+}
+
+// Constant-false while loop → empty block.
+fn opt_while(node) {
+    if let Some(cond) = gn(node, "cond") {
+        if cond["kind"] == "bool" && nval(cond) == "false" {
+            return empty_block(node);
+        }
+    }
+    node
+}
+
+// Constant-false for loop → empty block.
+fn opt_for(node) {
+    if let Some(cond) = gn(node, "cond") {
+        if cond["kind"] == "bool" && nval(cond) == "false" {
+            return empty_block(node);
+        }
+    }
+    node
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Dead-code elimination after `return`
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Remove every statement that follows a `return_stmt` inside a block or
+// function body — they are unreachable by definition.
+//
+// Children have already been individually optimised before this runs, so
+// the check can be a simple linear scan.
+fn elim_dead_after_return(node) {
+    let new_kids = [];
+    for child in ch(node) {
+        new_kids.push(child);
+        if child["kind"] == "return_stmt" {
+            break; // everything after this is unreachable
+        }
+    }
+    rebuild(node, new_kids)
+}
