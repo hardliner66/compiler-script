@@ -28,17 +28,19 @@ pub fn module() -> Result<Module, ContextError> {
 
     // ── Type constructors ─────────────────────────────────────────────────────
 
-    m.function("type_of", |name: String| CodeType { repr: name })
-        .build()?;
+    m.function("type_of", |name: &str| CodeType {
+        repr: name.to_owned(),
+    })
+    .build()?;
 
-    m.function("generic_type", |name: String, params: Vec<CodeType>| {
+    m.function("generic_type", |name: &str, params: Vec<CodeType>| {
         let ps = params
             .iter()
             .map(|p| p.repr.clone())
             .collect::<Vec<_>>()
             .join(", ");
         CodeType {
-            repr: format!("{}<{}>", name, ps),
+            repr: format!("{name}<{ps}>"),
         }
     })
     .build()?;
@@ -70,7 +72,7 @@ pub fn module() -> Result<Module, ContextError> {
             .collect::<Vec<_>>()
             .join(", ");
         CodeType {
-            repr: format!("({})", ps),
+            repr: format!("({ps})"),
         }
     })
     .build()?;
@@ -87,50 +89,49 @@ pub fn module() -> Result<Module, ContextError> {
 
     // ── Component constructors ────────────────────────────────────────────────
 
-    m.function("field", |name: String, ty: CodeType| Field {
-        name,
+    m.function("field", |name: &str, ty: CodeType| Field {
+        name: name.to_owned(),
         ty,
         optional: false,
     })
     .build()?;
 
-    m.function("field_opt", |name: String, ty: CodeType| Field {
-        name,
+    m.function("field_opt", |name: &str, ty: CodeType| Field {
+        name: name.to_owned(),
         ty,
         optional: true,
     })
     .build()?;
 
-    m.function("param", |name: String, ty: CodeType| Param { name, ty })
-        .build()?;
+    m.function("param", |name: &str, ty: CodeType| Param {
+        name: name.to_owned(),
+        ty,
+    })
+    .build()?;
 
-    m.function("variant", |name: String| Variant {
-        name,
+    m.function("variant", |name: &str| Variant {
+        name: name.to_owned(),
         fields: vec![],
         is_tuple: false,
     })
     .build()?;
 
-    m.function("variant_tuple", |name: String, fields: Vec<Field>| {
-        Variant {
-            name,
-            fields,
-            is_tuple: true,
-        }
+    m.function("variant_tuple", |name: &str, fields: Vec<Field>| Variant {
+        name: name.to_owned(),
+        fields,
+        is_tuple: true,
     })
     .build()?;
 
-    m.function("variant_struct", |name: String, fields: Vec<Field>| {
-        Variant {
-            name,
-            fields,
-            is_tuple: false,
-        }
+    m.function("variant_struct", |name: &str, fields: Vec<Field>| Variant {
+        name: name.to_owned(),
+        fields,
+        is_tuple: false,
     })
     .build()?;
 
-    m.function("field_init", |name: String, value: Expr| FieldInit {
-        name,
+    m.function("field_init", |name: &str, value: Expr| FieldInit {
+        name: name.to_owned(),
         value,
     })
     .build()?;
@@ -142,8 +143,10 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("pat_var", |name: String| Pattern {
-        kind: PatternKind::Variable { name },
+    m.function("pat_var", |name: &str| Pattern {
+        kind: PatternKind::Variable {
+            name: name.to_owned(),
+        },
     })
     .build()?;
 
@@ -154,9 +157,11 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("pat_lit_str", |s: String| Pattern {
+    m.function("pat_lit_str", |s: &str| Pattern {
         kind: PatternKind::Literal {
-            value: LitValue::Str { value: s },
+            value: LitValue::Str {
+                value: s.to_owned(),
+            },
         },
     })
     .build()?;
@@ -168,8 +173,11 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("pat_enum", |path: String, bindings: Vec<String>| Pattern {
-        kind: PatternKind::EnumTuple { path, bindings },
+    m.function("pat_enum", |path: &str, bindings: Vec<String>| Pattern {
+        kind: PatternKind::EnumTuple {
+            path: path.to_owned(),
+            bindings,
+        },
     })
     .build()?;
 
@@ -209,9 +217,9 @@ pub fn module() -> Result<Module, ContextError> {
 
     // ── Item constructors ─────────────────────────────────────────────────────
 
-    m.function("struct_def", |name: String, fields: Vec<Field>| Item {
+    m.function("struct_def", |name: &str, fields: Vec<Field>| Item {
         kind: ItemKind::Struct {
-            name,
+            name: name.to_owned(),
             fields,
             derives: vec![],
             is_pub: false,
@@ -220,22 +228,20 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("tuple_struct_def", |name: String, fields: Vec<Field>| {
-        Item {
-            kind: ItemKind::Struct {
-                name,
-                fields,
-                derives: vec![],
-                is_pub: false,
-                is_tuple: true,
-            },
-        }
+    m.function("tuple_struct_def", |name: &str, fields: Vec<Field>| Item {
+        kind: ItemKind::Struct {
+            name: name.to_owned(),
+            fields,
+            derives: vec![],
+            is_pub: false,
+            is_tuple: true,
+        },
     })
     .build()?;
 
-    m.function("enum_def", |name: String, variants: Vec<Variant>| Item {
+    m.function("enum_def", |name: &str, variants: Vec<Variant>| Item {
         kind: ItemKind::Enum {
-            name,
+            name: name.to_owned(),
             variants,
             derives: vec![],
             is_pub: false,
@@ -246,9 +252,9 @@ pub fn module() -> Result<Module, ContextError> {
     // fn_def: function with an explicit return type (passes CodeType directly, no Option wrapping)
     m.function(
         "fn_def",
-        |name: String, params: Vec<Param>, return_type: CodeType, body: Vec<Stmt>| Item {
+        |name: &str, params: Vec<Param>, return_type: CodeType, body: Vec<Stmt>| Item {
             kind: ItemKind::Fn {
-                name,
+                name: name.to_owned(),
                 params,
                 return_type: Some(return_type),
                 body,
@@ -262,9 +268,9 @@ pub fn module() -> Result<Module, ContextError> {
     // fn_def_void: function that returns nothing / unit
     m.function(
         "fn_def_void",
-        |name: String, params: Vec<Param>, body: Vec<Stmt>| Item {
+        |name: &str, params: Vec<Param>, body: Vec<Stmt>| Item {
             kind: ItemKind::Fn {
-                name,
+                name: name.to_owned(),
                 params,
                 return_type: None,
                 body,
@@ -275,37 +281,35 @@ pub fn module() -> Result<Module, ContextError> {
     )
     .build()?;
 
-    m.function("type_alias", |name: String, ty: CodeType| Item {
+    m.function("type_alias", |name: &str, ty: CodeType| Item {
         kind: ItemKind::TypeAlias {
-            name,
+            name: name.to_owned(),
             ty,
             is_pub: false,
         },
     })
     .build()?;
 
-    m.function("const_def", |name: String, ty: CodeType, value: Expr| {
-        Item {
-            kind: ItemKind::Const {
-                name,
-                ty,
-                value,
-                is_pub: false,
-            },
-        }
-    })
-    .build()?;
-
-    m.function("use_item", |path: String| Item {
-        kind: ItemKind::Use {
-            path,
+    m.function("const_def", |name: &str, ty: CodeType, value: Expr| Item {
+        kind: ItemKind::Const {
+            name: name.to_owned(),
+            ty,
+            value,
             is_pub: false,
         },
     })
     .build()?;
 
-    m.function("code_module", |name: String, items: Vec<Item>| CodeModule {
-        name,
+    m.function("use_item", |path: &str| Item {
+        kind: ItemKind::Use {
+            path: path.to_owned(),
+            is_pub: false,
+        },
+    })
+    .build()?;
+
+    m.function("code_module", |name: &str, items: Vec<Item>| CodeModule {
+        name: name.to_owned(),
         items,
     })
     .build()?;
@@ -339,9 +343,11 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("lit_str", |s: String| Expr {
+    m.function("lit_str", |s: &str| Expr {
         kind: ExprKind::Lit {
-            value: LitValue::Str { value: s },
+            value: LitValue::Str {
+                value: s.to_owned(),
+            },
         },
     })
     .build()?;
@@ -360,40 +366,45 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("var", |name: String| Expr {
-        kind: ExprKind::Var { name },
+    m.function("var", |name: &str| Expr {
+        kind: ExprKind::Var {
+            name: name.to_owned(),
+        },
     })
     .build()?;
 
-    m.function("call", |func: String, args: Vec<Expr>| Expr {
-        kind: ExprKind::Call { func, args },
+    m.function("call", |func: &str, args: Vec<Expr>| Expr {
+        kind: ExprKind::Call {
+            func: func.to_owned(),
+            args,
+        },
     })
     .build()?;
 
     m.function(
         "method_call",
-        |receiver: Expr, method: String, args: Vec<Expr>| Expr {
+        |receiver: Expr, method: &str, args: Vec<Expr>| Expr {
             kind: ExprKind::MethodCall {
                 receiver: Box::new(receiver),
-                method,
+                method: method.to_owned(),
                 args,
             },
         },
     )
     .build()?;
 
-    m.function("bin_op", |op: String, lhs: Expr, rhs: Expr| Expr {
+    m.function("bin_op", |op: &str, lhs: Expr, rhs: Expr| Expr {
         kind: ExprKind::BinOp {
-            op,
+            op: op.to_owned(),
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
         },
     })
     .build()?;
 
-    m.function("un_op", |op: String, operand: Expr| Expr {
+    m.function("un_op", |op: &str, operand: Expr| Expr {
         kind: ExprKind::UnOp {
-            op,
+            op: op.to_owned(),
             operand: Box::new(operand),
         },
     })
@@ -469,10 +480,10 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("field_access", |expr: Expr, field: String| Expr {
+    m.function("field_access", |expr: Expr, field: &str| Expr {
         kind: ExprKind::FieldAccess {
             inner: Box::new(expr),
-            field,
+            field: field.to_owned(),
         },
     })
     .build()?;
@@ -485,8 +496,11 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("struct_expr", |name: String, fields: Vec<FieldInit>| Expr {
-        kind: ExprKind::StructExpr { name, fields },
+    m.function("struct_expr", |name: &str, fields: Vec<FieldInit>| Expr {
+        kind: ExprKind::StructExpr {
+            name: name.to_owned(),
+            fields,
+        },
     })
     .build()?;
 
@@ -567,9 +581,9 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("let_stmt", |name: String, value: Expr| Stmt {
+    m.function("let_stmt", |name: &str, value: Expr| Stmt {
         kind: StmtKind::Let {
-            name,
+            name: name.to_owned(),
             ty: None,
             mutable: false,
             value,
@@ -577,9 +591,9 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("let_mut_stmt", |name: String, value: Expr| Stmt {
+    m.function("let_mut_stmt", |name: &str, value: Expr| Stmt {
         kind: StmtKind::Let {
-            name,
+            name: name.to_owned(),
             ty: None,
             mutable: true,
             value,
@@ -587,29 +601,26 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("let_typed", |name: String, ty: CodeType, value: Expr| {
-        Stmt {
-            kind: StmtKind::Let {
-                name,
-                ty: Some(ty),
-                mutable: false,
-                value,
-            },
-        }
+    m.function("let_typed", |name: &str, ty: CodeType, value: Expr| Stmt {
+        kind: StmtKind::Let {
+            name: name.to_owned(),
+            ty: Some(ty),
+            mutable: false,
+            value,
+        },
     })
     .build()?;
 
-    m.function(
-        "let_typed_mut",
-        |name: String, ty: CodeType, value: Expr| Stmt {
+    m.function("let_typed_mut", |name: &str, ty: CodeType, value: Expr| {
+        Stmt {
             kind: StmtKind::Let {
-                name,
+                name: name.to_owned(),
                 ty: Some(ty),
                 mutable: true,
                 value,
             },
-        },
-    )
+        }
+    })
     .build()?;
 
     m.function("let_destructure", |pattern: Pattern, value: Expr| Stmt {
@@ -658,10 +669,12 @@ pub fn module() -> Result<Module, ContextError> {
     })
     .build()?;
 
-    m.function("for_stmt", |var: String, iter: Expr, body: Vec<Stmt>| {
-        Stmt {
-            kind: StmtKind::For { var, iter, body },
-        }
+    m.function("for_stmt", |var: &str, iter: Expr, body: Vec<Stmt>| Stmt {
+        kind: StmtKind::For {
+            var: var.to_owned(),
+            iter,
+            body,
+        },
     })
     .build()?;
 

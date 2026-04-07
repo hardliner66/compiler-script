@@ -357,10 +357,10 @@ pub struct Item {
 
 impl Item {
     /// Append one derive to this item.  No-op for non-struct/enum items.
-    pub fn with_derive(mut self, derive: String) -> Self {
+    pub fn with_derive(mut self, derive: &str) -> Self {
         match &mut self.kind {
             ItemKind::Struct { derives, .. } | ItemKind::Enum { derives, .. } => {
-                derives.push(derive);
+                derives.push(derive.to_owned());
             }
             _ => {}
         }
@@ -418,14 +418,14 @@ impl Item {
                         .map(|f| f.ty.repr.clone())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("{}struct {}({})", pub_kw, name, fs)
+                    format!("{pub_kw}struct {name}({fs})")
                 } else {
                     let fs = fields
                         .iter()
                         .map(|f| format!("{}: {}", f.name, f.ty.repr))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("{}struct {} {{ {} }}", pub_kw, name, fs)
+                    format!("{pub_kw}struct {name} {{ {fs} }}")
                 }
             }
             ItemKind::Enum {
@@ -440,7 +440,7 @@ impl Item {
                     .map(|v| v.name.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{}enum {} {{ {} }}", pub_kw, name, vs)
+                format!("{pub_kw}enum {name} {{ {vs} }}")
             }
             ItemKind::Fn {
                 name,
@@ -461,7 +461,7 @@ impl Item {
                     Some(rt) => {
                         format!("{}{}fn {}({}) -> {}", pub_kw, async_kw, name, ps, rt.repr)
                     }
-                    None => format!("{}{}fn {}({})", pub_kw, async_kw, name, ps),
+                    None => format!("{pub_kw}{async_kw}fn {name}({ps})"),
                 }
             }
             ItemKind::TypeAlias { name, ty, is_pub } => {
@@ -476,7 +476,7 @@ impl Item {
             }
             ItemKind::Use { path, is_pub } => {
                 let pub_kw = if *is_pub { "pub " } else { "" };
-                format!("{}use {}", pub_kw, path)
+                format!("{pub_kw}use {path}")
             }
         }
     }

@@ -75,14 +75,17 @@ impl AstNode {
     }
 
     /// Add a single key-value attribute.
-    pub fn with_attr(mut self, key: String, value: String) -> Self {
-        self.attrs.push(Attr { key, value });
+    pub fn with_attr(mut self, key: &str, value: &str) -> Self {
+        self.attrs.push(Attr {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
         self
     }
 
     /// Set the role name of this node within its parent.
-    pub fn with_name(mut self, name: String) -> Self {
-        self.name = Some(name);
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
         self
     }
 
@@ -108,7 +111,7 @@ impl AstNode {
     }
 
     /// Look up an attribute value by key.
-    pub fn get_attr(&self, key: String) -> Option<String> {
+    pub fn get_attr(&self, key: &str) -> Option<String> {
         self.attrs
             .iter()
             .find(|a| a.key == key)
@@ -116,10 +119,10 @@ impl AstNode {
     }
 
     /// Find the first child whose `name` field equals `name`.
-    pub fn get_named_child(&self, name: String) -> Option<AstNode> {
+    pub fn get_named_child(&self, name: &str) -> Option<AstNode> {
         self.children
             .iter()
-            .find(|c| c.name.as_deref() == Some(name.as_str()))
+            .find(|c| c.name.as_deref() == Some(name))
             .cloned()
     }
 
@@ -153,7 +156,7 @@ pub struct Scanner {
 
 impl Scanner {
     /// Create a new scanner positioned at the start of `input`.
-    pub fn new(input: String) -> Self {
+    pub fn new(input: &str) -> Self {
         Self {
             chars: input.chars().collect(),
             pos: 0,
@@ -219,7 +222,7 @@ impl Scanner {
     }
 
     /// `true` if the upcoming characters exactly match `s` (without consuming).
-    pub fn match_str(&self, s: String) -> bool {
+    pub fn match_str(&self, s: &str) -> bool {
         let needle: Vec<char> = s.chars().collect();
         let end = self.pos + needle.len();
         end <= self.chars.len() && self.chars[self.pos..end] == needle[..]
@@ -231,32 +234,26 @@ impl Scanner {
     pub fn is_alpha(&self) -> bool {
         self.chars
             .get(self.pos)
-            .map(|c| c.is_alphabetic() || *c == '_')
-            .unwrap_or(false)
+            .is_some_and(|c| c.is_alphabetic() || *c == '_')
     }
 
     /// `true` if the current character is an ASCII digit.
     pub fn is_digit(&self) -> bool {
-        self.chars
-            .get(self.pos)
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
+        self.chars.get(self.pos).is_some_and(char::is_ascii_digit)
     }
 
     /// `true` if the current character is an ASCII letter, digit, or `_`.
     pub fn is_alphanumeric(&self) -> bool {
         self.chars
             .get(self.pos)
-            .map(|c| c.is_alphanumeric() || *c == '_')
-            .unwrap_or(false)
+            .is_some_and(|c| c.is_alphanumeric() || *c == '_')
     }
 
     /// `true` if the current character is ASCII whitespace.
     pub fn is_whitespace(&self) -> bool {
         self.chars
             .get(self.pos)
-            .map(|c| c.is_ascii_whitespace())
-            .unwrap_or(false)
+            .is_some_and(char::is_ascii_whitespace)
     }
 
     // ── Consuming ─────────────────────────────────────────────────────────
@@ -270,8 +267,8 @@ impl Scanner {
 
     /// If the upcoming characters match `s`, consume them and return `true`.
     /// Otherwise return `false` without moving.
-    pub fn consume_str(&mut self, s: String) -> bool {
-        if self.match_str(s.clone()) {
+    pub fn consume_str(&mut self, s: &str) -> bool {
+        if self.match_str(s) {
             for _ in s.chars() {
                 self.step();
             }
@@ -282,8 +279,8 @@ impl Scanner {
     }
 
     /// Consume `s` and return `Ok(())`, or return `Err(message)` if it doesn't match.
-    pub fn expect_str(&mut self, s: String) -> Result<(), String> {
-        if self.consume_str(s.clone()) {
+    pub fn expect_str(&mut self, s: &str) -> Result<(), String> {
+        if self.consume_str(s) {
             Ok(())
         } else {
             let got = self.peek_str(s.chars().count() as i64);
@@ -301,8 +298,7 @@ impl Scanner {
         while self
             .chars
             .get(self.pos)
-            .map(|c| c.is_ascii_whitespace())
-            .unwrap_or(false)
+            .is_some_and(char::is_ascii_whitespace)
         {
             self.step();
         }
@@ -321,8 +317,8 @@ impl Scanner {
 
     /// If the current position starts a line comment (beginning with `prefix`),
     /// skip to the end of the line and return `true`. Otherwise return `false`.
-    pub fn skip_line_comment(&mut self, prefix: String) -> bool {
-        if !self.match_str(prefix.clone()) {
+    pub fn skip_line_comment(&mut self, prefix: &str) -> bool {
+        if !self.match_str(prefix) {
             return false;
         }
         for _ in prefix.chars() {
@@ -341,15 +337,15 @@ impl Scanner {
     /// `close`, consume until the matching close delimiter and return `true`.
     /// Returns `false` (and does not move) if `open` doesn't match.
     /// Note: does **not** handle nested block comments.
-    pub fn skip_block_comment(&mut self, open: String, close: String) -> bool {
-        if !self.match_str(open.clone()) {
+    pub fn skip_block_comment(&mut self, open: &str, close: &str) -> bool {
+        if !self.match_str(open) {
             return false;
         }
         for _ in open.chars() {
             self.step();
         }
         while !self.is_done() {
-            if self.match_str(close.clone()) {
+            if self.match_str(close) {
                 for _ in close.chars() {
                     self.step();
                 }
@@ -369,16 +365,14 @@ impl Scanner {
         if self
             .chars
             .get(self.pos)
-            .map(|c| c.is_alphabetic() || *c == '_')
-            .unwrap_or(false)
+            .is_some_and(|c| c.is_alphabetic() || *c == '_')
         {
             out.push(self.chars[self.pos]);
             self.step();
             while self
                 .chars
                 .get(self.pos)
-                .map(|c| c.is_alphanumeric() || *c == '_')
-                .unwrap_or(false)
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
             {
                 out.push(self.chars[self.pos]);
                 self.step();
@@ -391,12 +385,7 @@ impl Scanner {
     /// Returns an empty string if the current character is not a digit.
     pub fn read_digits(&mut self) -> String {
         let mut out = String::new();
-        while self
-            .chars
-            .get(self.pos)
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
-        {
+        while self.chars.get(self.pos).is_some_and(char::is_ascii_digit) {
             out.push(self.chars[self.pos]);
             self.step();
         }
@@ -412,8 +401,7 @@ impl Scanner {
             if self
                 .chars
                 .get(self.pos + 1)
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
+                .is_some_and(char::is_ascii_digit)
             {
                 out.push('.');
                 self.step(); // consume '.'
@@ -438,9 +426,9 @@ impl Scanner {
 
     /// Read and return characters until the substring `end` is found.
     /// The `end` string itself is **not** consumed.
-    pub fn read_until_str(&mut self, end: String) -> String {
+    pub fn read_until_str(&mut self, end: &str) -> String {
         let mut out = String::new();
-        while !self.is_done() && !self.match_str(end.clone()) {
+        while !self.is_done() && !self.match_str(end) {
             out.push(self.chars[self.pos]);
             self.step();
         }

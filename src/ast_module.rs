@@ -29,8 +29,8 @@ pub fn module() -> Result<Module, ContextError> {
     // ── AstNode constructors ──────────────────────────────────────────────────
 
     // ast::node(kind, children) — interior node with positional children.
-    m.function("node", |kind: String, children: Vec<AstNode>| AstNode {
-        kind,
+    m.function("node", |kind: &str, children: Vec<AstNode>| AstNode {
+        kind: kind.to_owned(),
         name: None,
         value: None,
         span: None,
@@ -40,10 +40,10 @@ pub fn module() -> Result<Module, ContextError> {
     .build()?;
 
     // ast::leaf(kind, value) — terminal/leaf node carrying a string value.
-    m.function("leaf", |kind: String, value: String| AstNode {
-        kind,
+    m.function("leaf", |kind: &str, value: &str| AstNode {
+        kind: kind.to_owned(),
         name: None,
-        value: Some(value),
+        value: Some(value.to_owned()),
         span: None,
         children: vec![],
         attrs: vec![],
@@ -51,8 +51,8 @@ pub fn module() -> Result<Module, ContextError> {
     .build()?;
 
     // ast::empty(kind) — a node with no children and no value.
-    m.function("empty", |kind: String| AstNode {
-        kind,
+    m.function("empty", |kind: &str| AstNode {
+        kind: kind.to_owned(),
         name: None,
         value: None,
         span: None,
@@ -66,9 +66,9 @@ pub fn module() -> Result<Module, ContextError> {
     // by index, e.g. `parent.get_named_child("body")`.
     m.function(
         "named_node",
-        |name: String, kind: String, children: Vec<AstNode>| AstNode {
-            kind,
-            name: Some(name),
+        |name: &str, kind: &str, children: Vec<AstNode>| AstNode {
+            kind: kind.to_owned(),
+            name: Some(name.to_owned()),
             value: None,
             span: None,
             children,
@@ -78,11 +78,11 @@ pub fn module() -> Result<Module, ContextError> {
     .build()?;
 
     // ast::named_leaf(name, kind, value) — leaf node with a role name.
-    m.function("named_leaf", |name: String, kind: String, value: String| {
+    m.function("named_leaf", |name: &str, kind: &str, value: &str| {
         AstNode {
-            kind,
-            name: Some(name),
-            value: Some(value),
+            kind: kind.to_owned(),
+            name: Some(name.to_owned()),
+            value: Some(value.to_owned()),
             span: None,
             children: vec![],
             attrs: vec![],
@@ -105,7 +105,7 @@ pub fn module() -> Result<Module, ContextError> {
     // ── Scanner constructor ───────────────────────────────────────────────────
 
     // ast::scanner(input) — create a new scanner over the given string.
-    m.function("scanner", |input: String| Scanner::new(input))
+    m.function("scanner", |input: &str| Scanner::new(input))
         .build()?;
 
     // ── Scanner instance methods ──────────────────────────────────────────────

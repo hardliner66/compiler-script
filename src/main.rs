@@ -104,35 +104,32 @@ fn generate(
     let mut vm = Vm::new(runtime.clone(), unit);
 
     // Read the text to parse from a file argument or from stdin.
-    let input_text: Option<String> = match input {
-        Some(path) => Some(std::fs::read_to_string(path)?),
-        None => {
-            let stdin = std::io::stdin();
-            if stdin.is_terminal() {
-                None
-            } else {
-                let mut buf = String::new();
-                stdin.lock().read_to_string(&mut buf)?;
-                Some(buf)
-            }
+    let input_text: Option<String> = if let Some(path) = input {
+        Some(std::fs::read_to_string(path)?)
+    } else {
+        let stdin = std::io::stdin();
+        if stdin.is_terminal() {
+            None
+        } else {
+            let mut buf = String::new();
+            stdin.lock().read_to_string(&mut buf)?;
+            Some(buf)
         }
     };
     let result = if let Some(input_text) = input_text {
         let input = if text {
             rune::to_value(input_text)?
+        } else if let Ok(json) = serde_json::from_str(&input_text) {
+            json_to_rune(json)?
         } else {
-            if let Ok(json) = serde_json::from_str(&input_text) {
-                json_to_rune(json)?
-            } else {
-                rune::to_value(input_text)?
-            }
+            rune::to_value(input_text)?
         };
         vm.call(rune::Hash::type_hash(["main"]), (dbg!(input),))?
     } else {
         vm.call(rune::Hash::type_hash(["main"]), ())?
     };
 
-    let output_string = value_to_json(result, pretty)?;
+    let output_string = value_to_json(&result, pretty)?;
     if let Some(output_path) = output {
         std::fs::write(output_path, output_string)?;
     } else {
@@ -149,7 +146,7 @@ fn generate(
 /// serialize the inner Rust value.  If none match (e.g. the script returned a
 /// plain integer or string), we fall back to Rune's own `Serialize` impl which
 /// handles the primitive `Value` variants.
-fn value_to_json(value: Value, pretty: bool) -> anyhow::Result<String> {
+fn value_to_json(value: &Value, pretty: bool) -> anyhow::Result<String> {
     use types::{
         CodeModule, CodeType, Expr, Field, FieldInit, Item, MatchArm, Param, Pattern, PatternField,
         Stmt, Variant,
