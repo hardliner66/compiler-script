@@ -1,14 +1,3 @@
-// clang.rn — tree-walking interpreter for the simple C-like language.
-//
-// The AST is produced by parser-script running parser-script/examples/clang.rn,
-// serialised to JSON, and fed here via `json_to_rune` inside run-script.
-//
-// Usage (two-step):
-//   cargo run --bin parser-script -- --output ast.json \
-//       --input examples/demo.c parser-script/examples/clang.rn
-//   cargo run --bin run-script -- --input ast.json \
-//       run-script/examples/clang.rn
-
 pub fn main(ast) {
     let fns   = #{};
     let scope = #{};

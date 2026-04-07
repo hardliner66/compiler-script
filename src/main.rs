@@ -124,7 +124,7 @@ fn generate(
         } else {
             rune::to_value(input_text)?
         };
-        vm.call(rune::Hash::type_hash(["main"]), (dbg!(input),))?
+        vm.call(rune::Hash::type_hash(["main"]), (input,))?
     } else {
         vm.call(rune::Hash::type_hash(["main"]), ())?
     };

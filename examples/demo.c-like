@@ -1,12 +1,3 @@
-/* demo.c — exercises every major feature of the C-like interpreter.
- *
- * Run (two steps):
- *   cargo run --bin parser-script -- --output ast.json \
- *       --input examples/demo.c parser-script/examples/clang.rn
- *   cargo run --bin run-script -- --input ast.json \
- *       run-script/examples/clang.rn
- */
-
 /* ── Recursive functions ────────────────────────────────────────────────────
  */
 
