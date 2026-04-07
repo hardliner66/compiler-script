@@ -94,3 +94,120 @@ while (i <= 30) {
   }
   i = i + 1;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Optimisation showcase
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The three functions below are deliberately written in patterns that the
+ * optimiser (c-like.optimize.rn) can significantly speed up.  Run both
+ * pipelines and compare wall-clock time — output is identical either way.
+ *
+ * Step 1 — parse (do this once):
+ *   cargo run --bin parser-script -- \
+ *       --input examples/demo.c-like --output ast.json \
+ *       examples/c-like.parse.rn
+ *
+ * Without optimisation:
+ *   cargo run --bin run-script -- \
+ *       --input ast.json examples/c-like.run.rn
+ *
+ * With optimisation:
+ *   cargo run --bin run-script -- \
+ *       --input ast.json --output opt.json \
+ *       examples/c-like.optimize.rn
+ *   cargo run --bin run-script -- \
+ *       --input opt.json examples/c-like.run.rn
+ */
+
+/* ── (1) Constant folding ─────────────────────────────────────────────────────
+ *
+ * `step` is a tree of 11 binary operations that always evaluates to 64:
+ *
+ *   ((1+1)*(1+1)) * ((1+1)*(1+1)) * ((1+1)*(1+1))
+ *     = (2*2) * (2*2) * (2*2)
+ *     = 4 * 4 * 4
+ *     = 64
+ *
+ * Without optimisation: all 11 nodes are re-evaluated on EVERY loop iteration.
+ *   → n × 11 eval_bin_op calls just to compute a constant.
+ *
+ * With optimisation: the entire subtree is folded to the literal 64 before
+ *   the program starts running.
+ *   → n ×  0 extra calls — `step` is already the number 64.
+ */
+fn count_up_slow(n) {
+    let total = 0;
+    let i = 0;
+    while (i < n) {
+        let step = ((1 + 1) * (1 + 1)) * ((1 + 1) * (1 + 1)) * ((1 + 1) * (1 + 1));
+        total = total + step;
+        i = i + 1;
+    }
+    return total;
+}
+
+/* ── (2) Dead-branch elimination ─────────────────────────────────────────────
+ *
+ * `collatz_length` contains a guard `if (0 == 1)` that can never be true.
+ * Collatz sequences for small inputs are typically 50–300 steps deep, so
+ * summing across thousands of starting values generates hundreds of thousands
+ * of recursive calls — each one wastes time evaluating `0 == 1`.
+ *
+ * Without optimisation: `0 == 1` is evaluated on every single recursive call.
+ * With optimisation: the dead branch is removed from the AST entirely before
+ *   execution begins — zero cost per call.
+ */
+fn collatz_length(n) {
+    if (0 == 1) {
+        return 0;
+    }
+    if (n == 1) {
+        return 0;
+    }
+    if (n % 2 == 0) {
+        return 1 + collatz_length(n / 2);
+    }
+    return 1 + collatz_length(3 * n + 1);
+}
+
+/* ── (3) Algebraic identity simplification ───────────────────────────────────
+ *
+ * `noisy_inner` wraps its argument in five identity operations that cancel
+ * out completely:
+ *
+ *   x * 1 * 1 * 1 + 0 + 0  ≡  x
+ *
+ * Without optimisation: 5 extra binary ops executed on every call.
+ * With optimisation: the body is reduced to `return x` before execution —
+ *   all five redundant operations are stripped from the AST.
+ */
+fn noisy_inner(x) {
+    return x * 1 * 1 * 1 + 0 + 0;
+}
+
+fn noisy_sum(n) {
+    let total = 0;
+    let i = 0;
+    while (i < n) {
+        total = total + noisy_inner(i);
+        i = i + 1;
+    }
+    return total;
+}
+
+print("=== Optimisation demo 1: constant folding ===");
+print(count_up_slow(2000));
+
+print("=== Optimisation demo 2: dead-branch elimination ===");
+/* Sum of Collatz lengths for n = 1 .. 50.
+   Each number generates ~100–300 recursive calls; without optimisation
+   every call evaluates the dead `0 == 1` guard. */
+let col_total = 0;
+for (let cn = 1; cn <= 50; cn = cn + 1) {
+    col_total = col_total + collatz_length(cn);
+}
+print(col_total);
+
+print("=== Optimisation demo 3: algebraic identity simplification ===");
+print(noisy_sum(2000));
